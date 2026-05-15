@@ -18,10 +18,30 @@ export function reportBeijingDate(report: StockAiReport): string | null {
   return m ? m[1] : null;
 }
 
-/** 仅当报告生成日为北京时间「今天」时视为有效缓存，避免刷新页面后重复点 AI。 */
+/** 报告生成日为北京时间「今天」 */
 export function isAnalyzedToday(report: StockAiReport): boolean {
   const d = reportBeijingDate(report);
   return d !== null && d === beijingTodayDate();
+}
+
+function reportTimeValue(report: StockAiReport): number {
+  const t = Date.parse(report.analyzedAt.replace(" ", "T"));
+  return Number.isNaN(t) ? 0 : t;
+}
+
+export function mergeAiReports(
+  a: Record<string, StockAiReport>,
+  b: Record<string, StockAiReport>
+): Record<string, StockAiReport> {
+  const out: Record<string, StockAiReport> = { ...a };
+  for (const [sym, rb] of Object.entries(b)) {
+    const key = sym.toUpperCase();
+    const ra = out[key];
+    if (!ra || reportTimeValue(rb) >= reportTimeValue(ra)) {
+      out[key] = { ...rb, symbol: key };
+    }
+  }
+  return out;
 }
 
 export function loadAiReports(): Record<string, StockAiReport> {
@@ -35,17 +55,26 @@ export function loadAiReports(): Record<string, StockAiReport> {
   }
 }
 
+export function saveAiReportsAll(all: Record<string, StockAiReport>): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+}
+
 export function saveAiReport(report: StockAiReport): void {
   const all = loadAiReports();
   all[report.symbol.toUpperCase()] = report;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+  saveAiReportsAll(all);
 }
 
 export function getAiReport(symbol: string): StockAiReport | null {
   return loadAiReports()[symbol.toUpperCase()] ?? null;
 }
 
-/** 自选列表用：仅返回今日内的报告。 */
+/** 有本地/服务端同步的任意日期报告（用于展示，不耗 token） */
+export function getCachedAiReport(symbol: string): StockAiReport | null {
+  return getAiReport(symbol);
+}
+
+/** 组合优选等仍要求「今日」有效报告 */
 export function getTodayAiReport(symbol: string): StockAiReport | null {
   const r = getAiReport(symbol);
   if (!r || !isAnalyzedToday(r)) return null;
@@ -55,5 +84,35 @@ export function getTodayAiReport(symbol: string): StockAiReport | null {
 export function deleteAiReport(symbol: string): void {
   const all = loadAiReports();
   delete all[symbol.toUpperCase()];
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+  saveAiReportsAll(all);
+}
+
+export async function fetchAiReportsFromServer(): Promise<Record<string, StockAiReport>> {
+  const res = await fetch("/api/ai/reports");
+  if (!res.ok) return {};
+  const data = (await res.json()) as { reports?: StockAiReport[] };
+  const list = Array.isArray(data.reports) ? data.reports : [];
+  const out: Record<string, StockAiReport> = {};
+  for (const r of list) {
+    if (!r?.symbol) continue;
+    const sym = r.symbol.toUpperCase();
+    out[sym] = { ...r, symbol: sym };
+  }
+  return out;
+}
+
+export async function persistAiReportToServer(report: StockAiReport): Promise<void> {
+  const sym = report.symbol.toUpperCase();
+  await fetch(`/api/ai/reports/${encodeURIComponent(sym)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(report),
+  });
+}
+
+export async function deleteAiReportOnServer(symbol: string): Promise<void> {
+  const sym = symbol.toUpperCase();
+  const res = await fetch(`/api/ai/reports/${encodeURIComponent(sym)}`, { method: "DELETE" });
+  if (res.status === 404) return;
+  if (!res.ok) throw new Error(`删除服务端报告失败: ${res.status}`);
 }

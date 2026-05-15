@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import re
+import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -36,6 +38,8 @@ FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 WATCHLIST_PATH = DATA_DIR / "watchlist.json"
+AI_REPORTS_PATH = DATA_DIR / "ai_reports.json"
+_AI_REPORTS_LOCK = threading.Lock()
 
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9.\-]{1,10}$")
 
@@ -280,6 +284,83 @@ def _write_watchlist(symbols: list[str]) -> None:
     with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
         json.dump({"symbols": symbols}, f, ensure_ascii=False, indent=2)
         f.write("\n")
+
+
+def _normalize_ai_reports_map(reports: dict) -> dict[str, dict]:
+    if not isinstance(reports, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for k, v in reports.items():
+        if not isinstance(v, dict):
+            continue
+        try:
+            sym = _normalize_symbol(str(k))
+        except HTTPException:
+            continue
+        out[sym] = {**v, "symbol": sym}
+    return out
+
+
+def _read_ai_reports() -> dict[str, dict]:
+    if not AI_REPORTS_PATH.is_file():
+        return {}
+    raw = AI_REPORTS_PATH.read_text(encoding="utf-8")
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            data, _end = json.JSONDecoder().raw_decode(raw.lstrip())
+            logging.warning("ai_reports.json 已自动修复（截断尾部损坏内容）")
+            repaired = _normalize_ai_reports_map(
+                data.get("reports") if isinstance(data, dict) else data
+            )
+            _write_ai_reports(repaired)
+            return repaired
+        except Exception:
+            bak = AI_REPORTS_PATH.with_suffix(".json.bak")
+            try:
+                bak.write_text(raw, encoding="utf-8")
+            except OSError:
+                pass
+            logging.exception("ai_reports.json 无法解析，已备份为 %s", bak.name)
+            return {}
+    reports = data.get("reports") if isinstance(data, dict) else data
+    return _normalize_ai_reports_map(reports)
+
+
+def _write_ai_reports(reports: dict[str, dict]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    normalized = _normalize_ai_reports_map(reports)
+    payload = json.dumps({"reports": normalized}, ensure_ascii=False, indent=2) + "\n"
+    fd, tmp_path = tempfile.mkstemp(prefix="ai_reports_", suffix=".json", dir=DATA_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp_path, AI_REPORTS_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _save_ai_report_entry(entry: dict) -> dict:
+    sym = _normalize_symbol(str(entry.get("symbol") or ""))
+    with _AI_REPORTS_LOCK:
+        reports = _read_ai_reports()
+        reports[sym] = {
+            "symbol": sym,
+            "reply": str(entry.get("reply") or ""),
+            "analyzedAt": str(entry.get("analyzedAt") or ""),
+            "buyScore": entry.get("buyScore"),
+            "stance": entry.get("stance"),
+            "keyRisk": entry.get("keyRisk"),
+        }
+        _write_ai_reports(reports)
+        return reports[sym]
 
 
 def _quote_error(symbol: str, msg: str) -> dict:
@@ -1725,6 +1806,52 @@ def ai_watchlist_rank(body: WatchlistRankBody):
     }
 
 
+class AiReportBody(BaseModel):
+    symbol: str
+    reply: str = Field(..., min_length=1)
+    analyzedAt: str = Field(..., min_length=1, max_length=64)
+    buyScore: float | None = None
+    stance: str | None = Field(None, max_length=32)
+    keyRisk: str | None = Field(None, max_length=500)
+
+
+@app.get("/api/ai/reports")
+def ai_reports_list():
+    """返回本机持久化的全部单股 AI 报告（桌面端启动时同步）。"""
+    reports = _read_ai_reports()
+    return {"reports": list(reports.values())}
+
+
+@app.get("/api/ai/reports/{symbol}")
+def ai_report_get(symbol: str):
+    sym = _normalize_symbol(symbol)
+    report = _read_ai_reports().get(sym)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"无 {sym} 的已存报告")
+    return report
+
+
+@app.put("/api/ai/reports/{symbol}")
+def ai_report_put(symbol: str, body: AiReportBody):
+    sym = _normalize_symbol(symbol)
+    if _normalize_symbol(body.symbol) != sym:
+        raise HTTPException(status_code=400, detail="symbol 与路径不一致")
+    saved = _save_ai_report_entry(body.model_dump())
+    return saved
+
+
+@app.delete("/api/ai/reports/{symbol}")
+def ai_report_delete(symbol: str):
+    sym = _normalize_symbol(symbol)
+    with _AI_REPORTS_LOCK:
+        reports = _read_ai_reports()
+        if sym not in reports:
+            raise HTTPException(status_code=404, detail=f"无 {sym} 的已存报告")
+        del reports[sym]
+        _write_ai_reports(reports)
+    return {"ok": True, "symbol": sym}
+
+
 @app.post("/api/ai/analyze/{symbol}")
 def ai_analyze_symbol(symbol: str):
     sym = _normalize_symbol(symbol)
@@ -1735,7 +1862,7 @@ def ai_analyze_symbol(symbol: str):
     user_content = _build_ai_user_content(message, sym)
     reply = _call_llm_chat(user_content)
     labels = _server_now_labels()
-    return {
+    payload = {
         "symbol": sym,
         "reply": reply,
         "analyzedAt": labels["beijing"],
@@ -1744,6 +1871,8 @@ def ai_analyze_symbol(symbol: str):
         "stance": _parse_stance(reply),
         "keyRisk": _parse_key_risk(reply),
     }
+    _save_ai_report_entry(payload)
+    return payload
 
 
 @app.post("/api/ai/portfolio/curate")

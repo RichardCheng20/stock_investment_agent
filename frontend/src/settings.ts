@@ -87,4 +87,5 @@ export function applyPrefsToDocument(p: DisplayPrefs): void {
   root.dataset.nameFirst = p.nameFirst ? "1" : "0";
   root.dataset.usBadge = p.showUsBadge ? "1" : "0";
   root.dataset.swapChgPct = p.swapChgPctColumns ? "1" : "0";
+  root.style.colorScheme = p.colorTheme;
 }

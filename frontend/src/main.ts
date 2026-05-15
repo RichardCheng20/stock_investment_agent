@@ -2,10 +2,16 @@ import { markdownToSafeHtml } from "./renderMarkdown";
 import {
   beijingTodayDate,
   deleteAiReport,
+  deleteAiReportOnServer,
+  fetchAiReportsFromServer,
+  getCachedAiReport,
   getTodayAiReport,
   isAnalyzedToday,
   loadAiReports,
+  mergeAiReports,
+  persistAiReportToServer,
   saveAiReport,
+  saveAiReportsAll,
   type StockAiReport,
 } from "./aiReports";
 import {
@@ -172,8 +178,8 @@ async function runBulkWatchlistAnalyze() {
     const sym = raw.trim().toUpperCase();
     msg = `批量分析（${idx + 1}/${targets.length}）…`;
     render({ symbols, quotes, loading, msg, finnhubConfigured, quoteProvider });
-    const cached = getTodayAiReport(sym);
-    if (cached && isAnalyzedToday(cached)) {
+    const cached = getCachedAiReport(sym);
+    if (cached) {
       skipped++;
       continue;
     }
@@ -200,6 +206,7 @@ async function runBulkWatchlistAnalyze() {
       };
       aiReports[res.symbol.toUpperCase()] = report;
       saveAiReport(report);
+      void persistAiReportToServer(report).catch(() => {});
       newDone++;
     } catch (e) {
       msg = e instanceof Error ? e.message : String(e);
@@ -210,7 +217,7 @@ async function runBulkWatchlistAnalyze() {
     aiAnalyzingSymbols.delete(sym);
     await new Promise((r) => setTimeout(r, 450));
   }
-  msg = `批量完成：新分析 ${newDone} 只，跳过今日已有 ${skipped} 只`;
+  msg = `批量完成：新分析 ${newDone} 只，跳过已有缓存 ${skipped} 只`;
   render({ symbols, quotes, loading, msg, finnhubConfigured, quoteProvider });
 }
 
@@ -226,7 +233,7 @@ function getDisplayBuyScore(symbol: string): { score: number; source: "relative"
   const sym = symbol.trim().toUpperCase();
   const rel = getRelativeScore(sym, currentRankSymbolList());
   if (rel != null) return { score: rel, source: "relative" };
-  const report = getTodayAiReport(sym);
+  const report = getCachedAiReport(sym);
   if (report?.buyScore != null && !Number.isNaN(report.buyScore)) {
     return { score: report.buyScore, source: "single" };
   }
@@ -480,15 +487,17 @@ function aiReportCellHtml(symbol: string, report: StockAiReport | null, analyzin
     return `<span class="ai-row-status">分析中…</span>`;
   }
   if (report) {
-    return `<button type="button" class="btn-ai-chip" data-ai-view="${sym}" title="查看今日分析报告">查看</button>`;
+    const stale = !isAnalyzedToday(report);
+    const tag = stale ? "查看历史报告" : "查看分析报告";
+    return `<button type="button" class="btn-ai-chip${stale ? " btn-ai-chip--cached" : ""}" data-ai-view="${sym}" title="${tag}">查看</button>`;
   }
-  return `<button type="button" class="btn-ai-chip btn-ai-chip--primary" data-ai-analyze="${sym}" title="今日未分析，点击生成">AI</button>`;
+  return `<button type="button" class="btn-ai-chip btn-ai-chip--primary" data-ai-analyze="${sym}" title="无缓存，点击生成">AI</button>`;
 }
 
 function aiReportSheetHtml(): string {
   if (!aiReportSheetSymbol) return "";
   const sym = aiReportSheetSymbol.toUpperCase();
-  const report = getTodayAiReport(sym) ?? aiReports[sym] ?? null;
+  const report = getCachedAiReport(sym) ?? aiReports[sym] ?? null;
   if (!report) return "";
   const today = isAnalyzedToday(report);
   const display = getDisplayBuyScore(sym);
@@ -503,9 +512,10 @@ function aiReportSheetHtml(): string {
           }">买入评分 ${fmtBuyScore(report.buyScore)}/10</span>`
         : "";
   const footBtn = today
-    ? `<span class="ai-report-sheet__hint">今日已分析，刷新页面无需重复生成</span>
+    ? `<span class="ai-report-sheet__hint">今日已分析，重启应用将从服务端加载，无需重复消耗 token</span>
       <button type="button" class="btn-ghost" data-ai-reanalyze="${esc(sym)}">仍要重新分析</button>`
-    : `<button type="button" class="btn-ghost" data-ai-reanalyze="${esc(sym)}">重新分析（昨日及更早需更新）</button>`;
+    : `<span class="ai-report-sheet__hint">以下为历史缓存（${esc(report.analyzedAt)}），组合优选仍需今日单股分析</span>
+      <button type="button" class="btn-ghost" data-ai-reanalyze="${esc(sym)}">重新分析并更新</button>`;
   return `
   <div class="ai-report-backdrop" id="aiReportBackdrop" aria-hidden="false"></div>
   <aside class="ai-report-sheet" id="aiReportSheet" aria-label="${esc(sym)} AI 分析报告">
@@ -527,10 +537,12 @@ function aiReportSheetHtml(): string {
 async function runWatchlistAnalyze(symbol: string, openSheet: boolean, force = false) {
   const sym = symbol.trim().toUpperCase();
   if (!sym || aiAnalyzingSymbols.has(sym)) return;
-  const cached = getTodayAiReport(sym);
+  const cached = getCachedAiReport(sym);
   if (!force && cached) {
     if (openSheet) aiReportSheetSymbol = sym;
-    msg = `${sym} 今日已有分析`;
+    msg = isAnalyzedToday(cached)
+      ? `${sym} 今日已有分析（本地/服务端缓存）`
+      : `${sym} 已有历史分析，点「仍要重新分析」可更新`;
     render({ symbols, quotes, loading, msg, finnhubConfigured, quoteProvider });
     return;
   }
@@ -561,6 +573,7 @@ async function runWatchlistAnalyze(symbol: string, openSheet: boolean, force = f
     };
     aiReports[res.symbol.toUpperCase()] = report;
     saveAiReport(report);
+    void persistAiReportToServer(report).catch(() => {});
     if (openSheet) aiReportSheetSymbol = res.symbol.toUpperCase();
     msg = `${res.symbol} 分析完成`;
   } catch (e) {
@@ -645,6 +658,7 @@ async function toggleWatchlist(symbol: string) {
       symbols = symbols.filter((s) => s.toUpperCase() !== sym);
       deleteAiReport(sym);
       delete aiReports[sym];
+      void deleteAiReportOnServer(sym).catch(() => {});
       if (aiReportSheetSymbol === sym) aiReportSheetSymbol = null;
       msg = `已移出 ${sym}`;
     } else {
@@ -1256,7 +1270,7 @@ function render(state: {
       const colChgPct = prefs.swapChgPctColumns ? `${colPct}${colChg}` : `${colChg}${colPct}`;
 
       const symU = q.symbol.trim().toUpperCase();
-      const report = getTodayAiReport(symU);
+      const report = getCachedAiReport(symU);
       const analyzing = aiAnalyzingSymbols.has(symU);
       const symEsc = esc(symU);
 
@@ -1490,6 +1504,26 @@ let msg = "";
 let finnhubConfigured: boolean | null = null;
 let quoteProvider: string | null = null;
 
+async function syncAiReportsFromServer(): Promise<void> {
+  try {
+    const local = loadAiReports();
+    const remote = await fetchAiReportsFromServer();
+    const merged = mergeAiReports(local, remote);
+    aiReports = merged;
+    saveAiReportsAll(merged);
+    const uploadKeys = Object.keys(merged).slice(0, 40);
+    for (const sym of uploadKeys) {
+      const loc = merged[sym];
+      const rem = remote[sym];
+      if (loc && (!rem || Date.parse(loc.analyzedAt) >= Date.parse(rem.analyzedAt || ""))) {
+        await persistAiReportToServer(loc).catch(() => {});
+      }
+    }
+  } catch {
+    aiReports = loadAiReports();
+  }
+}
+
 async function loadAll() {
   aiReports = loadAiReports();
   loading = true;
@@ -1511,6 +1545,7 @@ async function loadAll() {
     finnhubConfigured = h.finnhub_configured === true;
     quoteProvider = h.quote_provider ?? null;
     aiConfigured = h.llm_configured === true || h.openai_configured === true;
+    await syncAiReportsFromServer();
     msg = `已更新 ${new Date().toLocaleString("zh-CN")}`;
   } catch (e) {
     msg = `请求失败：${e instanceof Error ? e.message : String(e)}（请确认后端已启动）`;
@@ -1551,6 +1586,7 @@ async function onDel(symbol: string) {
     await api(`/api/watchlist/symbol/${encodeURIComponent(sym)}`, { method: "DELETE" });
     deleteAiReport(sym);
     delete aiReports[sym];
+    void deleteAiReportOnServer(sym).catch(() => {});
     if (aiReportSheetSymbol === sym) aiReportSheetSymbol = null;
     if (viewSymbol?.toUpperCase() === sym) {
       viewSymbol = null;
