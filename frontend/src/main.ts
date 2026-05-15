@@ -930,6 +930,7 @@ function ensureShellNavigation() {
       if (a === "theme") {
         prefs = { ...prefs, colorTheme: prefs.colorTheme === "dark" ? "light" : "dark" };
         savePrefs(prefs);
+        watchlistMenuOpen = false;
         applyPrefsToDocument(prefs);
         render({ symbols, quotes, loading, msg, finnhubConfigured, quoteProvider });
         return;
@@ -1495,6 +1496,7 @@ function render(state: {
   bindSettingsUi();
   if (appTab === "ai") bindAiPanel();
   if (stockSearchOpen) bindStockSearchInput();
+  applyPrefsToDocument(prefs);
 }
 
 let symbols: string[] = [];

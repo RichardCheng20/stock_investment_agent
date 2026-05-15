@@ -1,8 +1,6 @@
 # stock_investment_agent
 
 面向美股投资人的个人辅助工具：维护自选股、多源行情一览，并以 **Analyst Agent（单股）** + **Portfolio Curator（组合优选）** 两条大模型链路提供研究与横向比较。**本文档为产品设计与技术说明**，含架构图；需求迭代时请同步更新。
-<img width="647" height="655" alt="image" src="https://github.com/user-attachments/assets/aff71668-b88e-4e29-8101-a6c0b7c16459" />
-
 ---
 
 ## 技术亮点（AI / 大模型应用开发）

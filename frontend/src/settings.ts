@@ -79,13 +79,57 @@ export function savePrefs(p: DisplayPrefs): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
 }
 
+/** 明暗主题语义色：内联写到 html/body，避免仅改 data 属性时部分浏览器不重算 :root 变量 */
+const THEME_CSS_VARS: Record<ColorTheme, Record<string, string>> = {
+  dark: {
+    bg: "#0f1419",
+    panel: "#1a2332",
+    border: "#2d3a4d",
+    text: "#e8eef5",
+    muted: "#8b9cb3",
+    flat: "#8b9cb3",
+    accent: "#5b9cf5",
+    "tab-bar-bg": "#101820",
+    "tab-ico-muted": "#5c6b7e",
+  },
+  light: {
+    bg: "#e6ecf4",
+    panel: "#ffffff",
+    border: "#c8d4e4",
+    text: "#0f172a",
+    muted: "#5c6b80",
+    flat: "#64748b",
+    accent: "#1d6fdb",
+    "tab-bar-bg": "#dce6f2",
+    "tab-ico-muted": "#6b7f95",
+  },
+};
+
 export function applyPrefsToDocument(p: DisplayPrefs): void {
   const root = document.documentElement;
-  root.dataset.colorTheme = p.colorTheme;
+  const body = document.body;
+  const theme = p.colorTheme === "light" ? "light" : "dark";
+  const vars = THEME_CSS_VARS[theme];
+
+  root.dataset.colorTheme = theme;
   root.dataset.colorScheme = p.colorScheme;
   root.dataset.compact = p.compact ? "1" : "0";
   root.dataset.nameFirst = p.nameFirst ? "1" : "0";
   root.dataset.usBadge = p.showUsBadge ? "1" : "0";
   root.dataset.swapChgPct = p.swapChgPctColumns ? "1" : "0";
-  root.style.colorScheme = p.colorTheme;
+
+  root.classList.remove("theme-dark", "theme-light");
+  root.classList.add(theme === "light" ? "theme-light" : "theme-dark");
+  body.classList.remove("theme-dark", "theme-light");
+  body.classList.add(theme === "light" ? "theme-light" : "theme-dark");
+
+  for (const [key, value] of Object.entries(vars)) {
+    root.style.setProperty(`--${key}`, value);
+    body.style.setProperty(`--${key}`, value);
+  }
+  root.style.colorScheme = theme;
+  body.style.colorScheme = theme;
+
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
+  if (meta) meta.content = theme;
 }

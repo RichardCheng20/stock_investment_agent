@@ -1,6 +1,12 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
   <head>
+    <script>
+      try {
+        var p = JSON.parse(localStorage.getItem("sia_display_prefs_v1") || "{}");
+        document.documentElement.dataset.colorTheme = p.colorTheme === "light" ? "light" : "dark";
+      } catch (e) {}
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />

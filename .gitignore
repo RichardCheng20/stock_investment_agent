@@ -10,5 +10,5 @@ frontend/dist/
 .DS_Store
 *.log
 .run/
-backend/data/ai_reports.json
 backend/data/ai_reports.json.bak
+backend/data/watchlist_layout.json
